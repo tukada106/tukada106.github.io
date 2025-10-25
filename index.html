@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -75,49 +76,14 @@ function setBusy(b){
   document.getElementById("btn-send").textContent = b ? "送信中..." : "このIDを送信";
 }
 function log(s){ document.getElementById("log").textContent = s; }
-function originOnly(){ return { referrerPolicy:"strict-origin" }; }
 
-async function getNonce(baseUrl){
-  const tm = withTimeout(8000);
-  try{
-    const r = await fetch(baseUrl + "?op=nonce", { signal: tm.signal, ...originOnly() });
-    if (!r.ok) throw new Error("nonce取得失敗: HTTP " + r.status);
-    const j = await r.json();
-    if (!j || !j.nonce) throw new Error("nonceが空");
-    return j.nonce;
-  }finally{ tm.cancel(); }
+function baseUrl(){
+  const u = document.getElementById("gasurl").value.trim();
+  return u.replace(/\?+.*/,''); // safety
 }
-
-async function postSend(baseUrl, irId){
-  const nonce = await getNonce(baseUrl);
-  const idem  = uuidv4();
-  const body  = { ir_id: irId, idempotency_key: idem, nonce, client_ts: Date.now(), origin_hint: location.origin };
-  const tm = withTimeout(15000);
-  let res, text;
-  try{
-    res = await fetch(baseUrl, {
-      method: "POST",
-      body: JSON.stringify(body),
-      signal: tm.signal,
-      ...originOnly()
-    });
-    text = await res.text();
-  } finally { tm.cancel(); }
-  let parsed; try{ parsed = JSON.parse(text); }catch{ parsed = { raw:text }; }
-  return { status: res.status, body: parsed };
-}
-
-async function fetchNames(baseUrl){
-  const r = await fetch(baseUrl + "?op=names", originOnly());
-  if (!r.ok) throw new Error("names取得失敗: HTTP " + r.status);
-  const j = await r.json();
-  return (j && j.names) || [];
-}
-async function fetchSuggest(baseUrl, q, k=6){
-  const r = await fetch(baseUrl + "?op=suggest&q=" + encodeURIComponent(q) + "&k=" + k, originOnly());
-  if (!r.ok) throw new Error("suggest取得失敗: HTTP " + r.status);
-  const j = await r.json();
-  return (j && j.suggestions) || [];
+function originHintParam(){
+  // Apps Script 側の Origin 許可に使う（ORIGIN_ALLOW が設定されている場合のみ評価）
+  return "&origin_hint=" + encodeURIComponent(location.origin);
 }
 
 function renderChips(el, items, onClick){
@@ -156,11 +122,63 @@ const els = {
 
 let allNames = [];
 
-async function doSync(){
-  const base = els.gas.value.trim();
-  if (!\/exec(\?|$)/.test(base)){ log("GASの公開URL（/exec）を指定してください。"); return; }
+async function apiGet(pathAndQuery){
+  const tm = withTimeout(10000);
   try{
-    const list = await fetchNames(base);
+    const r = await fetch(baseUrl() + pathAndQuery + originHintParam(), {
+      signal: tm.signal,
+      referrerPolicy: "strict-origin"
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return await r.json();
+  }finally{ tm.cancel(); }
+}
+
+async function getNonce(){
+  const j = await apiGet("?op=nonce");
+  if (!j || !j.nonce) throw new Error("nonce取得失敗");
+  return j.nonce;
+}
+
+async function postSend(irId){
+  const nonce = await getNonce();
+  const idem  = uuidv4();
+  const body  = {
+    ir_id: irId,
+    idempotency_key: idem,
+    nonce,
+    client_ts: Date.now(),
+    origin_hint: location.origin
+  };
+  const tm = withTimeout(15000);
+  let res, text;
+  try{
+    res = await fetch(baseUrl(), {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal: tm.signal,
+      referrerPolicy: "strict-origin"
+    });
+    text = await res.text();
+  } finally { tm.cancel(); }
+  let parsed; try{ parsed = JSON.parse(text); }catch{ parsed = { raw:text }; }
+  return { status: res.status, body: parsed };
+}
+
+async function fetchNames(){
+  const j = await apiGet("?op=names");
+  return (j && j.names) || [];
+}
+async function fetchSuggest(q, k=8){
+  const j = await apiGet("?op=suggest&q=" + encodeURIComponent(q) + "&k=" + k);
+  return (j && j.suggestions) || [];
+}
+
+async function doSync(){
+  const u = baseUrl();
+  if (!/\/exec(\?|$|$)/.test(u)){ log("GASの公開URL（/exec）を指定してください。"); return; }
+  try{
+    const list = await fetchNames();
     allNames = list;
     renderChips(els.names, allNames, n=> { els.irid.value = n; });
     log("一覧を更新しました（" + allNames.length + "件）");
@@ -196,23 +214,21 @@ function localFuzzy(q){
 }
 
 async function updateSuggest(){
-  const base = els.gas.value.trim();
   const q = els.search.value || els.irid.value || "";
   if (!q){ renderChips(els.suggest, [], ()=>{}); return; }
 
-  // まずローカルで素早く候補、APIがあれば上書き
+  // まずローカル
   let candidates = localFuzzy(q);
   renderChips(els.suggest, candidates, n=> { els.irid.value = n; });
 
-  if (/\/exec(\?|$)/.test(base)){
-    try{
-      const s = await fetchSuggest(base, q, 8);
-      if (Array.isArray(s) && s.length) {
-        candidates = s;
-        renderChips(els.suggest, candidates, n=> { els.irid.value = n; });
-      }
-    }catch{}
-  }
+  // サーバ側が有効なら上書き
+  try{
+    const s = await fetchSuggest(q, 8);
+    if (Array.isArray(s) && s.length) {
+      candidates = s;
+      renderChips(els.suggest, candidates, n=> { els.irid.value = n; });
+    }
+  }catch{}
 }
 
 els.search.addEventListener("input", updateSuggest);
@@ -224,17 +240,19 @@ els.sync.addEventListener("click", async ()=>{
 });
 
 els.send.addEventListener("click", async ()=>{
-  const base = els.gas.value.trim();
+  const u = baseUrl();
   const irId = els.irid.value.trim();
-  if (!base || !irId){ log("URLとIR IDを入力/選択してください。"); return; }
-  if (!\/exec(\?|$)/.test(base)){ log("GASの公開URL（/exec）を指定してください。"); return; }
+  if (!u || !irId){ log("URLとIR IDを入力/選択してください。"); return; }
+  if (!/\/exec(\?|$|$)/.test(u)){ log("GASの公開URL（/exec）を指定してください。"); return; }
   setBusy(true);
   log("送信中...");
   try{
-    const result = await postSend(base, irId);
+    const result = await postSend(irId);
     log(JSON.stringify(result, null, 2));
-    saveRecent(irId);
-    renderChips(els.recent, loadRecent(), n=> { els.irid.value = n; });
+    if (result && result.body && result.body.ok) {
+      saveRecent(irId);
+      renderChips(els.recent, loadRecent(), n=> { els.irid.value = n; });
+    }
   }catch(err){
     log("エラー: " + (err?.message || String(err)));
   }finally{
@@ -242,7 +260,7 @@ els.send.addEventListener("click", async ()=>{
   }
 });
 
-// 初回：recent を描画
+// 初期化
 renderChips(els.recent, loadRecent(), n=> { els.irid.value = n; });
 </script>
 </body>
