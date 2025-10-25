@@ -5,75 +5,58 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>IR送信テストページ</title>
 <style>
-  body {
-    font-family: "Segoe UI", sans-serif;
-    background: #f9fafb;
-    margin: 0;
-    padding: 2rem;
-    color: #333;
-  }
-  h1 { font-size: 1.6rem; margin-bottom: 1rem; }
-  .card {
-    background: #fff;
-    border-radius: 1rem;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-    padding: 1.5rem;
-    max-width: 480px;
-    margin: auto;
-  }
-  label { display: block; margin-top: 1rem; font-weight: bold; }
-  input, button {
-    width: 100%;
-    margin-top: .5rem;
-    padding: .6rem;
-    font-size: 1rem;
-    border-radius: .5rem;
-    border: 1px solid #ccc;
-  }
-  button {
-    background: #0078d7;
-    color: #fff;
-    border: none;
-    cursor: pointer;
-  }
-  button:hover { background: #005fa3; }
-  pre {
-    background: #272822;
-    color: #eee;
-    padding: 1rem;
-    border-radius: .5rem;
-    overflow-x: auto;
-    font-size: .9rem;
-    margin-top: 1.5rem;
-  }
+  body { font-family: "Segoe UI", sans-serif; background:#f9fafb; margin:0; padding:2rem; color:#333; }
+  h1 { font-size:1.6rem; margin-bottom:1rem; }
+  .card { background:#fff; border-radius:1rem; box-shadow:0 2px 8px rgba(0,0,0,.1); padding:1.5rem; max-width:480px; margin:auto; }
+  label { display:block; margin-top:1rem; font-weight:bold; }
+  input, button { width:100%; margin-top:.5rem; padding:.6rem; font-size:1rem; border-radius:.5rem; border:1px solid #ccc; }
+  button { background:#0078d7; color:#fff; border:none; cursor:pointer; }
+  button:hover { background:#005fa3; }
+  button:disabled { opacity:.6; cursor:not-allowed; }
+  pre { background:#272822; color:#eee; padding:1rem; border-radius:.5rem; overflow-x:auto; font-size:.9rem; margin-top:1.5rem; }
+  small { color:#666; }
 </style>
 </head>
 <body>
   <div class="card">
     <h1>IR学習リモコン テスト</h1>
 
-    <label for="irid">IR ID（例：TV_POWER）</label>
-    <input id="irid" placeholder="IRコードのIDを入力" />
+    <label for="irid">IR ID（例：サーキュレーター電源）</label>
+    <input id="irid" placeholder="IRコードのID（シートの name 列）" />
 
-    <label for="gasurl">GAS WebアプリURL</label>
+    <label for="gasurl">GAS WebアプリURL <small>※/exec で終わる公開URL</small></label>
     <input id="gasurl" value="https://script.google.com/macros/s/AKfycbxxxxxxxxxxxxxxxxxxxx/exec" />
 
-    <button id="btn-send">送信</button>
+    <button id="btn-send" type="button">送信</button>
 
     <pre id="log">結果はここに表示されます</pre>
   </div>
 
 <script>
-function uuidv4() {
-  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+function uuidv4(){
+  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c=>
     (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
   );
 }
 
-async function getNonce(baseUrl) {
-  const res = await fetch(baseUrl + "?op=nonce");
-  const js = await res.json();
-  return js.nonce;
+async function getNonce(baseUrl, signal){
+  const r = await fetch(baseUrl + "?op=nonce", { signal });
+  if (!r.ok) throw new Error("nonce取得失敗: HTTP " + r.status);
+  const j = await r.json();
+  if (!j || !j.nonce) throw new Error("nonceが空");
+  return j.nonce;
+}
+
+function withTimeout(ms){
+  const ac = new AbortController();
+  const t = setTimeout(()=>ac.abort(new DOMException("timeout","AbortError")), ms);
+  return { signal: ac.signal, cancel: ()=>clearTimeout(t) };
+}
+
+function setBusy(busy){
+  const btn = document.getElementById("btn-send");
+  btn.disabled = busy;
+  btn.textContent = busy ? "送信中..." : "送信";
 }
 
 document.getElementById("btn-send").addEventListener("click", async () => {
@@ -81,39 +64,31 @@ document.getElementById("btn-send").addEventListener("click", async () => {
   const irId = document.getElementById("irid").value.trim();
   const log = document.getElementById("log");
 
-  if (!gasUrl || !irId) {
-    log.textContent = "URLとIR IDを入力してください。";
-    return;
-  }
+  if (!gasUrl || !irId) { log.textContent = "URLとIR IDを入力してください。"; return; }
+  if (!/\/exec(\?|$)/.test(gasUrl)) { log.textContent = "GASの公開URL（/exec）を指定してください。"; return; }
 
-  log.textContent = "送信中...";
+  setBusy(true);
+  log.textContent = "準備中...";
 
+  const tm = withTimeout(8000);
   try {
-    const nonce = await getNonce(gasUrl);
+    const nonce = await getNonce(gasUrl, tm.signal);
+    log.textContent = "送信中...";
+
     const idem = uuidv4();
+    const body = { ir_id: irId, idempotency_key: idem, nonce, client_ts: Date.now() };
 
-    const body = {
-      ir_id: irId,
-      idempotency_key: idem,
-      nonce: nonce,
-      client_ts: Date.now()
-    };
-
-    const res = await fetch(gasUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-
+    // Content-Type を付けない＝simple request（プリフライト回避）
+    const res = await fetch(gasUrl, { method: "POST", body: JSON.stringify(body), signal: tm.signal });
     const text = await res.text();
-    try {
-      const js = JSON.parse(text);
-      log.textContent = JSON.stringify(js, null, 2);
-    } catch {
-      log.textContent = text;
-    }
+
+    let parsed; try { parsed = JSON.parse(text); } catch { parsed = { raw:text }; }
+    log.textContent = JSON.stringify({ status: res.status, body: parsed }, null, 2);
   } catch (err) {
-    log.textContent = "エラー: " + err.message;
+    log.textContent = "エラー: " + (err && err.message ? err.message : String(err));
+  } finally {
+    tm.cancel();
+    setBusy(false);
   }
 });
 </script>
