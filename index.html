@@ -1,41 +1,121 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-    <meta charset="utf-8">
-    <title>あなたのＨＰタイトル</title>
-    <meta name="keywords" content="ページのキーワードA,B,C">
-    <meta name="description" content="ページの説明">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>IR送信テストページ</title>
+<style>
+  body {
+    font-family: "Segoe UI", sans-serif;
+    background: #f9fafb;
+    margin: 0;
+    padding: 2rem;
+    color: #333;
+  }
+  h1 { font-size: 1.6rem; margin-bottom: 1rem; }
+  .card {
+    background: #fff;
+    border-radius: 1rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    padding: 1.5rem;
+    max-width: 480px;
+    margin: auto;
+  }
+  label { display: block; margin-top: 1rem; font-weight: bold; }
+  input, button {
+    width: 100%;
+    margin-top: .5rem;
+    padding: .6rem;
+    font-size: 1rem;
+    border-radius: .5rem;
+    border: 1px solid #ccc;
+  }
+  button {
+    background: #0078d7;
+    color: #fff;
+    border: none;
+    cursor: pointer;
+  }
+  button:hover { background: #005fa3; }
+  pre {
+    background: #272822;
+    color: #eee;
+    padding: 1rem;
+    border-radius: .5rem;
+    overflow-x: auto;
+    font-size: .9rem;
+    margin-top: 1.5rem;
+  }
+</style>
 </head>
 <body>
-    <div id="outer">
-        <header>
-            <div class="header-inner">
-                <h1>あなたのＨＰタイトル</h1>
-                <p>あなたのＨＰの説明文</p>
-            </div>
-        </header>
-        <div id="content">
-            <div class="inner">
-                <h2>記事ページ見出し・大</h2>
-                <p>文章あれこれ</p>
-                <h3>記事ページ見出し・中</h3>
-                <p>文章あれこれ</p>
-                <h4>記事ページ見出し・小</h4>
-                <p>文章あれこれ</p>
-            </div>
-            <aside>
-                <div class="left-title">サイドバータイトル</div>
-                <div class="link">
-                    <ul>
-                        <li>記事ページへのリンク</li>
-                        <li>記事ページへのリンク</li>
-                    </ul>
-                </div>
-            </aside>
-        </div>
-        <footer>© 2010 あなたのホームページ</footer>
-    </div>
+  <div class="card">
+    <h1>IR学習リモコン テスト</h1>
+
+    <label for="irid">IR ID（例：TV_POWER）</label>
+    <input id="irid" placeholder="IRコードのIDを入力" />
+
+    <label for="gasurl">GAS WebアプリURL</label>
+    <input id="gasurl" value="https://script.google.com/macros/s/AKfycbxxxxxxxxxxxxxxxxxxxx/exec" />
+
+    <button id="btn-send">送信</button>
+
+    <pre id="log">結果はここに表示されます</pre>
+  </div>
+
+<script>
+function uuidv4() {
+  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+  );
+}
+
+async function getNonce(baseUrl) {
+  const res = await fetch(baseUrl + "?op=nonce");
+  const js = await res.json();
+  return js.nonce;
+}
+
+document.getElementById("btn-send").addEventListener("click", async () => {
+  const gasUrl = document.getElementById("gasurl").value.trim();
+  const irId = document.getElementById("irid").value.trim();
+  const log = document.getElementById("log");
+
+  if (!gasUrl || !irId) {
+    log.textContent = "URLとIR IDを入力してください。";
+    return;
+  }
+
+  log.textContent = "送信中...";
+
+  try {
+    const nonce = await getNonce(gasUrl);
+    const idem = uuidv4();
+
+    const body = {
+      ir_id: irId,
+      idempotency_key: idem,
+      nonce: nonce,
+      client_ts: Date.now()
+    };
+
+    const res = await fetch(gasUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+    const text = await res.text();
+    try {
+      const js = JSON.parse(text);
+      log.textContent = JSON.stringify(js, null, 2);
+    } catch {
+      log.textContent = text;
+    }
+  } catch (err) {
+    log.textContent = "エラー: " + err.message;
+  }
+});
+</script>
 </body>
 </html>
