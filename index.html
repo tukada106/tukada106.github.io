@@ -3,31 +3,57 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>IR送信テストページ</title>
+<title>IR学習リモコン テスト（一覧＆検索付き）</title>
 <style>
-  body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background:#f9fafb; margin:0; padding:2rem; color:#333; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:#f9fafb; margin:0; padding:2rem; color:#333; }
   h1 { font-size:1.6rem; margin-bottom:1rem; }
-  .card { background:#fff; border-radius:1rem; box-shadow:0 2px 8px rgba(0,0,0,.1); padding:1.5rem; max-width:520px; margin:auto; }
+  .card { background:#fff; border-radius:1rem; box-shadow:0 2px 8px rgba(0,0,0,.1); padding:1.5rem; max-width:900px; margin:auto; }
   label { display:block; margin-top:1rem; font-weight:bold; }
-  input, button { width:100%; margin-top:.5rem; padding:.6rem; font-size:1rem; border-radius:.5rem; border:1px solid #ccc; }
-  button { background:#0078d7; color:#fff; border:none; cursor:pointer; transition:opacity .15s ease; }
-  button:hover { background:#005fa3; }
+  input, button, select { width:100%; margin-top:.5rem; padding:.6rem; font-size:1rem; border-radius:.5rem; border:1px solid #ccc; }
+  button.primary { background:#0078d7; color:#fff; border:none; cursor:pointer; transition:opacity .15s ease; }
+  button.primary:hover { background:#005fa3; }
   button:disabled { opacity:.6; cursor:not-allowed; }
-  pre { background:#111827; color:#e5e7eb; padding:1rem; border-radius:.5rem; overflow-x:auto; font-size:.9rem; margin-top:1.5rem; }
+  .row { display:grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .toolbar { display:flex; gap:.5rem; margin-top:1rem; flex-wrap:wrap; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(160px,1fr)); gap:.5rem; margin-top:1rem; }
+  .chip { padding:.5rem .6rem; border:1px solid #ddd; border-radius:.75rem; background:#fff; cursor:pointer; }
+  .chip:hover { background:#f3f4f6; }
+  .section-title { margin-top:1.4rem; font-weight:700; }
+  pre { background:#111827; color:#e5e7eb; padding:1rem; border-radius:.5rem; overflow:auto; font-size:.9rem; margin-top:1.2rem; }
   small { color:#666; }
 </style>
 </head>
 <body>
   <div class="card">
-    <h1>IR学習リモコン テスト</h1>
-
-    <label for="irid">IR ID（例：サーキュレーター電源）</label>
-    <input id="irid" placeholder="シートの name 列と一致させてね" />
+    <h1>IR学習リモコン テスト（一覧＆検索付き）</h1>
 
     <label for="gasurl">GAS WebアプリURL <small>※ /exec で終わるURL</small></label>
     <input id="gasurl" value="https://script.google.com/macros/s/AKfycbxxxxxxxxxxxxxxxxxxxx/exec" />
 
-    <button id="btn-send" type="button">送信</button>
+    <div class="row">
+      <div>
+        <label for="search">検索（前方/部分/あいまい）</label>
+        <input id="search" placeholder="例：サーキュレーター電源 / power / りもこん" />
+      </div>
+      <div>
+        <label for="irid">IR ID（直接入力も可）</label>
+        <input id="irid" placeholder="シートの name 列と一致させてね" />
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <button id="btn-sync" type="button">一覧を同期</button>
+      <button id="btn-send" class="primary" type="button">このIDを送信</button>
+    </div>
+
+    <div class="section-title">サジェスト</div>
+    <div id="suggest" class="grid"></div>
+
+    <div class="section-title">IR一覧</div>
+    <div id="names" class="grid"></div>
+
+    <div class="section-title">最近使ったID</div>
+    <div id="recent" class="grid"></div>
 
     <pre id="log">結果はここに表示されます</pre>
   </div>
@@ -44,71 +70,180 @@ function withTimeout(ms){
   return { signal: ac.signal, cancel: () => clearTimeout(t) };
 }
 function setBusy(b){
-  const btn = document.getElementById("btn-send");
-  btn.disabled = b;
-  btn.textContent = b ? "送信中..." : "送信";
+  document.getElementById("btn-send").disabled = b;
+  document.getElementById("btn-sync").disabled = b;
+  document.getElementById("btn-send").textContent = b ? "送信中..." : "このIDを送信";
 }
+function log(s){ document.getElementById("log").textContent = s; }
+function originOnly(){ return { referrerPolicy:"strict-origin" }; }
+
 async function getNonce(baseUrl){
-  const tm = withTimeout(8000); // ノンス取得は8秒
+  const tm = withTimeout(8000);
   try{
-    const r = await fetch(baseUrl + "?op=nonce", { signal: tm.signal, referrerPolicy: "strict-origin" });
+    const r = await fetch(baseUrl + "?op=nonce", { signal: tm.signal, ...originOnly() });
     if (!r.ok) throw new Error("nonce取得失敗: HTTP " + r.status);
     const j = await r.json();
     if (!j || !j.nonce) throw new Error("nonceが空");
     return j.nonce;
-  }finally{
-    tm.cancel();
+  }finally{ tm.cancel(); }
+}
+
+async function postSend(baseUrl, irId){
+  const nonce = await getNonce(baseUrl);
+  const idem  = uuidv4();
+  const body  = { ir_id: irId, idempotency_key: idem, nonce, client_ts: Date.now(), origin_hint: location.origin };
+  const tm = withTimeout(15000);
+  let res, text;
+  try{
+    res = await fetch(baseUrl, {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal: tm.signal,
+      ...originOnly()
+    });
+    text = await res.text();
+  } finally { tm.cancel(); }
+  let parsed; try{ parsed = JSON.parse(text); }catch{ parsed = { raw:text }; }
+  return { status: res.status, body: parsed };
+}
+
+async function fetchNames(baseUrl){
+  const r = await fetch(baseUrl + "?op=names", originOnly());
+  if (!r.ok) throw new Error("names取得失敗: HTTP " + r.status);
+  const j = await r.json();
+  return (j && j.names) || [];
+}
+async function fetchSuggest(baseUrl, q, k=6){
+  const r = await fetch(baseUrl + "?op=suggest&q=" + encodeURIComponent(q) + "&k=" + k, originOnly());
+  if (!r.ok) throw new Error("suggest取得失敗: HTTP " + r.status);
+  const j = await r.json();
+  return (j && j.suggestions) || [];
+}
+
+function renderChips(el, items, onClick){
+  el.innerHTML = "";
+  items.forEach(n=>{
+    const b = document.createElement("button");
+    b.className = "chip";
+    b.type = "button";
+    b.textContent = n;
+    b.addEventListener("click", ()=> onClick(n));
+    el.appendChild(b);
+  });
+}
+
+function saveRecent(id){
+  const key="recent_ir_ids";
+  const arr = JSON.parse(localStorage.getItem(key) || "[]").filter(x=>x!==id);
+  arr.unshift(id);
+  localStorage.setItem(key, JSON.stringify(arr.slice(0,20)));
+}
+function loadRecent(){
+  try{ return JSON.parse(localStorage.getItem("recent_ir_ids") || "[]"); }catch{ return []; }
+}
+
+const els = {
+  gas: document.getElementById("gasurl"),
+  irid: document.getElementById("irid"),
+  search: document.getElementById("search"),
+  names: document.getElementById("names"),
+  suggest: document.getElementById("suggest"),
+  recent: document.getElementById("recent"),
+  send: document.getElementById("btn-send"),
+  sync: document.getElementById("btn-sync"),
+  log: document.getElementById("log"),
+};
+
+let allNames = [];
+
+async function doSync(){
+  const base = els.gas.value.trim();
+  if (!\/exec(\?|$)/.test(base)){ log("GASの公開URL（/exec）を指定してください。"); return; }
+  try{
+    const list = await fetchNames(base);
+    allNames = list;
+    renderChips(els.names, allNames, n=> { els.irid.value = n; });
+    log("一覧を更新しました（" + allNames.length + "件）");
+    updateSuggest();
+    renderChips(els.recent, loadRecent(), n=> { els.irid.value = n; });
+  }catch(e){
+    log("エラー: " + (e?.message || String(e)));
   }
 }
 
-document.getElementById("btn-send").addEventListener("click", async () => {
-  const gasUrl = document.getElementById("gasurl").value.trim();
-  const irId   = document.getElementById("irid").value.trim();
-  const log    = document.getElementById("log");
-
-  if (!gasUrl || !irId){ log.textContent = "URLとIR IDを入力してください。"; return; }
-  if (!/\/exec(\?|$)/.test(gasUrl)){ log.textContent = "GASの公開URL（/exec）を指定してください。"; return; }
-
-  setBusy(true);
-  log.textContent = "準備中...";
-
-  try{
-    // 1) Nonce（個別タイムアウト）
-    const nonce = await getNonce(gasUrl);
-
-    // 2) 本送信（15秒タイムアウト・プリフライト回避・Refererはオリジンのみ）
-    log.textContent = "送信中...";
-    const idem = uuidv4();
-    const body = {
-      ir_id: irId,
-      idempotency_key: idem,
-      nonce,
-      client_ts: Date.now(),
-      origin_hint: location.origin // 最終フォールバック用
+function localFuzzy(q){
+  const low = q.trim().toLowerCase();
+  if (!low) return [];
+  const score = n => {
+    const L = n.toLowerCase();
+    if (L.startsWith(low)) return 0;
+    if (L.includes(low)) return 1;
+    // 簡易距離
+    const d = (a,b)=>{
+      const m=[]; let i,j; if(!(a && b)) return (a||b).length;
+      for(i=0;i<=b.length;i++) m[i]=[i];
+      for(j=0;j<=a.length;j++) m[0][j]=j;
+      for(i=1;i<=b.length;i++){
+        for(j=1;j<=a.length;j++){
+          m[i][j] = b.charAt(i-1)===a.charAt(j-1)? m[i-1][j-1] : Math.min(m[i-1][j-1]+1,m[i][j-1]+1,m[i-1][j]+1);
+        }
+      }
+      return m[b.length][a.length];
     };
+    return 2 + d(L, low) / Math.max(L.length, low.length);
+  };
+  return allNames.slice().sort((a,b)=>score(a)-score(b)).slice(0,8);
+}
 
-    const tm2 = withTimeout(15000); // 本送信は15秒
-    let res, text;
+async function updateSuggest(){
+  const base = els.gas.value.trim();
+  const q = els.search.value || els.irid.value || "";
+  if (!q){ renderChips(els.suggest, [], ()=>{}); return; }
+
+  // まずローカルで素早く候補、APIがあれば上書き
+  let candidates = localFuzzy(q);
+  renderChips(els.suggest, candidates, n=> { els.irid.value = n; });
+
+  if (/\/exec(\?|$)/.test(base)){
     try{
-      res  = await fetch(gasUrl, {
-        method: "POST",
-        body: JSON.stringify(body),        // ← Content-Typeは付けない（simple request）
-        signal: tm2.signal,
-        referrerPolicy: "strict-origin"    // ← Refererに https://<user>.github.io だけを送る
-      });
-      text = await res.text();
-    }finally{
-      tm2.cancel();
-    }
+      const s = await fetchSuggest(base, q, 8);
+      if (Array.isArray(s) && s.length) {
+        candidates = s;
+        renderChips(els.suggest, candidates, n=> { els.irid.value = n; });
+      }
+    }catch{}
+  }
+}
 
-    let parsed; try{ parsed = JSON.parse(text); }catch{ parsed = { raw: text }; }
-    log.textContent = JSON.stringify({ status: res.status, body: parsed }, null, 2);
+els.search.addEventListener("input", updateSuggest);
+els.irid.addEventListener("input", updateSuggest);
+
+els.sync.addEventListener("click", async ()=>{
+  setBusy(true);
+  try{ await doSync(); } finally { setBusy(false); }
+});
+
+els.send.addEventListener("click", async ()=>{
+  const base = els.gas.value.trim();
+  const irId = els.irid.value.trim();
+  if (!base || !irId){ log("URLとIR IDを入力/選択してください。"); return; }
+  if (!\/exec(\?|$)/.test(base)){ log("GASの公開URL（/exec）を指定してください。"); return; }
+  setBusy(true);
+  log("送信中...");
+  try{
+    const result = await postSend(base, irId);
+    log(JSON.stringify(result, null, 2));
+    saveRecent(irId);
+    renderChips(els.recent, loadRecent(), n=> { els.irid.value = n; });
   }catch(err){
-    log.textContent = "エラー: " + (err?.message || String(err));
+    log("エラー: " + (err?.message || String(err)));
   }finally{
     setBusy(false);
   }
 });
+
+// 初回：recent を描画
+renderChips(els.recent, loadRecent(), n=> { els.irid.value = n; });
 </script>
 </body>
 </html>
